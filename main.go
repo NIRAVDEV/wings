@@ -157,6 +157,152 @@ func tokenMiddleware(expectedToken string, next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+// Start Minecraft server container
+func startMCServer(name, userEmail, hostPort string) error {
+	userId := extractUserId(userEmail)
+	containerName := fmt.Sprintf("%s-%s", name, userId)
+	volumePath := filepath.Join("./volume", containerName)
+
+	if err := os.MkdirAll(volumePath, 0755); err != nil {
+		return fmt.Errorf("failed to create volume dir: %w", err)
+	}
+
+	// Check if container exists
+	cmdCheck := exec.Command("docker", "ps", "-a", "-q", "-f", "name="+containerName)
+	output, err := cmdCheck.Output()
+	if err != nil {
+		return fmt.Errorf("docker check error: %w", err)
+	}
+
+	if len(output) > 0 {
+		// Start container if it is stopped
+		cmdStart := exec.Command("docker", "start", containerName)
+		out, err := cmdStart.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("docker start error: %s, %w", string(out), err)
+		}
+		return nil
+	}
+
+	// Run new container
+	cmdRun := exec.Command("docker", "run", "-d",
+		"--name", containerName,
+		"-p", hostPort+":25565",
+		"-v", volumePath+":/data",
+		"itzg/minecraft-server",
+	)
+	out, err := cmdRun.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker run error: %s, %w", string(out), err)
+	}
+	return nil
+}
+
+func stopMCServer(name, userEmail string) error {
+	userId := extractUserId(userEmail)
+	containerName := fmt.Sprintf("%s-%s", name, userId)
+
+	cmd := exec.Command("docker", "stop", containerName)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker stop error: %s, %w", string(out), err)
+	}
+	return nil
+}
+
+func restartMCServer(name, userEmail string) error {
+	userId := extractUserId(userEmail)
+	containerName := fmt.Sprintf("%s-%s", name, userId)
+
+	cmd := exec.Command("docker", "restart", containerName)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker restart error: %s, %w", string(out), err)
+	}
+	return nil
+}
+
+// Handler for POST /server/start
+func startServerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req CreateServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if req.ServerName == "" || req.UserEmail == "" {
+		http.Error(w, "serverName and userEmail required", http.StatusBadRequest)
+		return
+	}
+	if req.HostPort == "" {
+		req.HostPort = "25565" // default port
+	}
+	err := startMCServer(req.ServerName, req.UserEmail, req.HostPort)
+	if err != nil {
+		resp := GenericResponse{Status: "error", Message: err.Error()}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+	resp := GenericResponse{Status: "ok", Message: "Server started successfully"}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// Handler for POST /server/stop
+func stopServerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req CreateServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if req.ServerName == "" || req.UserEmail == "" {
+		http.Error(w, "serverName and userEmail required", http.StatusBadRequest)
+		return
+	}
+	err := stopMCServer(req.ServerName, req.UserEmail)
+	if err != nil {
+		resp := GenericResponse{Status: "error", Message: err.Error()}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+	resp := GenericResponse{Status: "ok", Message: "Server stopped successfully"}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// Handler for POST /server/restart
+func restartServerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req CreateServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if req.ServerName == "" || req.UserEmail == "" {
+		http.Error(w, "serverName and userEmail required", http.StatusBadRequest)
+		return
+	}
+	err := restartMCServer(req.ServerName, req.UserEmail)
+	if err != nil {
+		resp := GenericResponse{Status: "error", Message: err.Error()}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+	resp := GenericResponse{Status: "ok", Message: "Server restarted successfully"}
+	json.NewEncoder(w).Encode(resp)
+}
+
 
 func main() {
 	token := loadToken()
