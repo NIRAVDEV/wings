@@ -1,9 +1,9 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
@@ -13,161 +13,101 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// HandshakeResponse is the response JSON for /handshake
-type HandshakeResponse struct {
-	Status string `json:"status"`
-	Reason string `json:"reason,omitempty"`
-}
-
-// CreateServerRequest defines the expected JSON body for /server endpoints
+// Request/Response structures
 type CreateServerRequest struct {
-	ServerName string `json:"serverName"` // e.g. "lobby"
-	UserEmail  string `json:"userEmail"`  // e.g. "alice@example.com"
-	HostPort   string `json:"hostPort"`   // optional for /server/start
+	ServerName string `json:"serverName"`
+	UserEmail  string `json:"userEmail"`
+	HostPort   string `json:"hostPort,omitempty"`
 }
 
-// GenericResponse is a generic status response
+type CreateServerResponse struct {
+	Status   string `json:"status"`
+	ServerId string `json:"serverId,omitempty"`
+	Message  string `json:"message,omitempty"`
+}
+
 type GenericResponse struct {
 	Status  string `json:"status"`
 	Message string `json:"message,omitempty"`
 }
 
-// UploadFileRequest defines JSON body for file upload/edit
-type UploadFileRequest struct {
-	ServerName    string `json:"serverName"`
-	UserEmail     string `json:"userEmail"`
-	Path          string `json:"path"`
-	ContentBase64 string `json:"contentBase64"`
+type FileManagerRequest struct {
+	Path    string `json:"path"`
+	Content string `json:"content,omitempty"` // For writing
 }
 
-// DeleteFileRequest defines JSON body for file delete
-type DeleteFileRequest struct {
-	ServerName string `json:"serverName"`
-	UserEmail  string `json:"userEmail"`
-	Path       string `json:"path"`
-}
-
-// Load handshake token from .env file
+// Load token from .env file
 func loadToken() string {
-	err := godotenv.Load()
-	if err != nil {
-		fmt.Println("Error loading .env file")
-		os.Exit(1)
-	}
+	_ = godotenv.Load()
 	token := os.Getenv("HANDSHAKE_TOKEN")
 	if token == "" {
-		fmt.Println("HANDSHAKE_TOKEN missing in .env")
+		fmt.Println("Missing HANDSHAKE_TOKEN in .env")
 		os.Exit(1)
 	}
 	return token
 }
 
-// Extract user id (before @) from email
+// Extract user ID prefix from email
 func extractUserId(email string) string {
 	parts := strings.Split(email, "@")
-	if len(parts) == 0 {
-		return "unknown"
+	if len(parts) > 0 {
+		return parts[0]
 	}
-	return parts[0]
+	return "user"
 }
 
-// Get server data directory path
-func getServerDataDir(serverName, userEmail string) string {
-	userId := extractUserId(userEmail)
-	return filepath.Join("./volume", fmt.Sprintf("%s-%s", serverName, userId))
-}
-
-// Middleware to check Bearer token in Authorization header
-func tokenMiddleware(expectedToken string, next http.Handler) http.Handler {
+// Middleware to check Bearer token
+func tokenMiddleware(expected string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authHeader, "Bearer ") {
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
 			http.Error(w, "Unauthorized - missing Bearer token", http.StatusUnauthorized)
 			return
 		}
-
-		token := strings.TrimPrefix(authHeader, "Bearer ")
-		if token != expectedToken {
+		token := strings.TrimPrefix(auth, "Bearer ")
+		if token != expected {
 			http.Error(w, "Unauthorized - invalid token", http.StatusUnauthorized)
 			return
 		}
-
 		next.ServeHTTP(w, r)
 	})
 }
 
-// Handshake handler: simply responds ok if token is valid (middleware verifies token)
-func handshakeHandler(w http.ResponseWriter, r *http.Request) {
-	resp := HandshakeResponse{Status: "ok"}
+// /server/create - creates server folder
+func createServerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req CreateServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if req.ServerName == "" || req.UserEmail == "" {
+		http.Error(w, "serverName and userEmail required", http.StatusBadRequest)
+		return
+	}
+
+	userId := extractUserId(req.UserEmail)
+	serverId := fmt.Sprintf("%s-%s", req.ServerName, userId)
+	volumePath := filepath.Join("./volume", serverId)
+
+	if err := os.MkdirAll(volumePath, 0755); err != nil {
+		http.Error(w, "Failed to create volume: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := CreateServerResponse{
+		Status:   "ok",
+		ServerId: serverId,
+		Message:  "Server folder created",
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
-// Start MC server container or start if already exists
-func startMCServer(name, userEmail, hostPort string) error {
-	userId := extractUserId(userEmail)
-	containerName := fmt.Sprintf("%s-%s", name, userId)
-	volumePath := getServerDataDir(name, userEmail)
-
-	if err := os.MkdirAll(volumePath, 0755); err != nil {
-		return fmt.Errorf("failed to create volume dir: %w", err)
-	}
-
-	cmdCheck := exec.Command("docker", "ps", "-a", "-q", "-f", "name="+containerName)
-	output, err := cmdCheck.Output()
-	if err != nil {
-		return fmt.Errorf("docker check error: %w", err)
-	}
-
-	if len(output) > 0 {
-		cmdStart := exec.Command("docker", "start", containerName)
-		out, err := cmdStart.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("docker start error: %s, %w", string(out), err)
-		}
-		return nil
-	}
-
-	cmdRun := exec.Command("docker", "run", "-d",
-		"--name", containerName,
-		"-p", hostPort+":25565",
-		"-v", volumePath+":/data",
-		"itzg/minecraft-server",
-	)
-	out, err := cmdRun.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("docker run error: %s, %w", string(out), err)
-	}
-	return nil
-}
-
-// Stop MC server container
-func stopMCServer(name, userEmail string) error {
-	userId := extractUserId(userEmail)
-	containerName := fmt.Sprintf("%s-%s", name, userId)
-
-	cmd := exec.Command("docker", "stop", containerName)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("docker stop error: %s, %w", string(out), err)
-	}
-	return nil
-}
-
-// Restart MC server container
-func restartMCServer(name, userEmail string) error {
-	userId := extractUserId(userEmail)
-	containerName := fmt.Sprintf("%s-%s", name, userId)
-
-	cmd := exec.Command("docker", "restart", containerName)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("docker restart error: %s, %w", string(out), err)
-	}
-	return nil
-}
-
-// Handler: POST /server/start
+// /server/start - start or run Docker container
 func startServerHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -185,18 +125,51 @@ func startServerHandler(w http.ResponseWriter, r *http.Request) {
 	if req.HostPort == "" {
 		req.HostPort = "25565"
 	}
-	err := startMCServer(req.ServerName, req.UserEmail, req.HostPort)
-	if err != nil {
-		resp := GenericResponse{Status: "error", Message: err.Error()}
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(resp)
+
+	userId := extractUserId(req.UserEmail)
+	containerId := fmt.Sprintf("%s-%s", req.ServerName, userId)
+	volumePath := filepath.Join("./volume", containerId)
+
+	if _, err := os.Stat(volumePath); os.IsNotExist(err) {
+		http.Error(w, "Server volume missing, create server first", http.StatusBadRequest)
 		return
 	}
-	resp := GenericResponse{Status: "ok", Message: "Server started successfully"}
+
+	// Check if container exists
+	checkCmd := exec.Command("docker", "inspect", containerId)
+	err := checkCmd.Run()
+	if err == nil {
+		// Container exists, start it
+		startCmd := exec.Command("docker", "start", containerId)
+		if output, err := startCmd.CombinedOutput(); err != nil {
+			http.Error(w, "Failed to start container: "+string(output), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// Container doesn't exist - run new container
+		runCmd := exec.Command("docker", "run", "-d",
+			"--name", containerId,
+			"-v", volumePath+":/data",
+			"-p", req.HostPort+":25565",
+			"-e", "EULA=TRUE",
+			"--restart", "unless-stopped",
+			"itzg/minecraft-server",
+		)
+		if output, err := runCmd.CombinedOutput(); err != nil {
+			http.Error(w, "Failed to run container: "+string(output), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	resp := GenericResponse{
+		Status:  "ok",
+		Message: fmt.Sprintf("Server %s started on port %s", containerId, req.HostPort),
+	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
-// Handler: POST /server/stop
+// /server/stop - stop running container
 func stopServerHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -211,18 +184,25 @@ func stopServerHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "serverName and userEmail required", http.StatusBadRequest)
 		return
 	}
-	err := stopMCServer(req.ServerName, req.UserEmail)
-	if err != nil {
-		resp := GenericResponse{Status: "error", Message: err.Error()}
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(resp)
+
+	userId := extractUserId(req.UserEmail)
+	containerId := fmt.Sprintf("%s-%s", req.ServerName, userId)
+
+	stopCmd := exec.Command("docker", "stop", containerId)
+	if output, err := stopCmd.CombinedOutput(); err != nil {
+		http.Error(w, "Failed to stop container: "+string(output), http.StatusInternalServerError)
 		return
 	}
-	resp := GenericResponse{Status: "ok", Message: "Server stopped successfully"}
+
+	resp := GenericResponse{
+		Status:  "ok",
+		Message: fmt.Sprintf("Server %s stopped", containerId),
+	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
-// Handler: POST /server/restart
+// /server/restart - restart container
 func restartServerHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -237,156 +217,78 @@ func restartServerHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "serverName and userEmail required", http.StatusBadRequest)
 		return
 	}
-	err := restartMCServer(req.ServerName, req.UserEmail)
-	if err != nil {
-		resp := GenericResponse{Status: "error", Message: err.Error()}
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(resp)
+
+	userId := extractUserId(req.UserEmail)
+	containerId := fmt.Sprintf("%s-%s", req.ServerName, userId)
+
+	restartCmd := exec.Command("docker", "restart", containerId)
+	if output, err := restartCmd.CombinedOutput(); err != nil {
+		http.Error(w, "Failed to restart container: "+string(output), http.StatusInternalServerError)
 		return
 	}
-	resp := GenericResponse{Status: "ok", Message: "Server restarted successfully"}
+
+	resp := GenericResponse{
+		Status:  "ok",
+		Message: fmt.Sprintf("Server %s restarted", containerId),
+	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
-// Handler: GET /files/list
-func listFilesHandler(w http.ResponseWriter, r *http.Request) {
-	serverName := r.URL.Query().Get("serverName")
-	userEmail := r.URL.Query().Get("userEmail")
-	relPath := r.URL.Query().Get("path") // optional
+// /file_manager - simple read/write files (basic example)
+func fileManagerHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		// Read file content
+		path := r.URL.Query().Get("path")
+		if path == "" {
+			http.Error(w, "Missing path parameter", http.StatusBadRequest)
+			return
+		}
+		absPath := filepath.Join("./volume", path)
+		data, err := ioutil.ReadFile(absPath)
+		if err != nil {
+			http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Write(data)
 
-	if serverName == "" || userEmail == "" {
-		http.Error(w, "serverName and userEmail are required", http.StatusBadRequest)
-		return
+	case http.MethodPost:
+		// Write file content
+		var req FileManagerRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		if req.Path == "" {
+			http.Error(w, "Missing path in body", http.StatusBadRequest)
+			return
+		}
+		absPath := filepath.Join("./volume", req.Path)
+		if err := ioutil.WriteFile(absPath, []byte(req.Content), 0644); err != nil {
+			http.Error(w, "Failed to write file: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(GenericResponse{Status: "ok", Message: "File written successfully"})
+
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
-
-	baseDir := getServerDataDir(serverName, userEmail)
-	dirPath := baseDir
-	if relPath != "" {
-		dirPath = filepath.Join(baseDir, relPath)
-	}
-
-	entries, err := os.ReadDir(dirPath)
-	if err != nil {
-		http.Error(w, "Failed to read directory: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	type FileEntry struct {
-		Name  string `json:"name"`
-		IsDir bool   `json:"isDir"`
-	}
-	var files []FileEntry
-	for _, entry := range entries {
-		files = append(files, FileEntry{
-			Name:  entry.Name(),
-			IsDir: entry.IsDir(),
-		})
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(files)
-}
-
-// Handler: GET /files/download
-func downloadFileHandler(w http.ResponseWriter, r *http.Request) {
-	serverName := r.URL.Query().Get("serverName")
-	userEmail := r.URL.Query().Get("userEmail")
-	filePath := r.URL.Query().Get("path")
-
-	if serverName == "" || userEmail == "" || filePath == "" {
-		http.Error(w, "serverName, userEmail, and path are required", http.StatusBadRequest)
-		return
-	}
-
-	baseDir := getServerDataDir(serverName, userEmail)
-	fullPath := filepath.Join(baseDir, filePath)
-
-	data, err := os.ReadFile(fullPath)
-	if err != nil {
-		http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Disposition", "attachment; filename="+filepath.Base(filePath))
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Write(data)
-}
-
-// Handler: POST /files/upload (upload or overwrite)
-func uploadFileHandler(w http.ResponseWriter, r *http.Request) {
-	var req UploadFileRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
-		return
-	}
-	if req.ServerName == "" || req.UserEmail == "" || req.Path == "" || req.ContentBase64 == "" {
-		http.Error(w, "serverName, userEmail, path, and contentBase64 are required", http.StatusBadRequest)
-		return
-	}
-
-	baseDir := getServerDataDir(req.ServerName, req.UserEmail)
-	fullPath := filepath.Join(baseDir, req.Path)
-
-	content, err := base64.StdEncoding.DecodeString(req.ContentBase64)
-	if err != nil {
-		http.Error(w, "Failed to decode base64: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		http.Error(w, "Failed to create directories: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if err := os.WriteFile(fullPath, content, 0644); err != nil {
-		http.Error(w, "Failed to write file: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	json.NewEncoder(w).Encode(GenericResponse{Status: "ok", Message: "File uploaded"})
-}
-
-// Handler: POST /files/delete
-func deleteFileHandler(w http.ResponseWriter, r *http.Request) {
-	var req DeleteFileRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
-		return
-	}
-	if req.ServerName == "" || req.UserEmail == "" || req.Path == "" {
-		http.Error(w, "serverName, userEmail, and path are required", http.StatusBadRequest)
-		return
-	}
-
-	baseDir := getServerDataDir(req.ServerName, req.UserEmail)
-	fullPath := filepath.Join(baseDir, req.Path)
-
-	if err := os.Remove(fullPath); err != nil {
-		http.Error(w, "Failed to delete file: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	json.NewEncoder(w).Encode(GenericResponse{Status: "ok", Message: "File deleted"})
 }
 
 func main() {
 	token := loadToken()
 
 	mux := http.NewServeMux()
-
-	// Authentication protected routes
-	mux.HandleFunc("/handshake", handshakeHandler)
-
+	mux.HandleFunc("/server/create", createServerHandler)
 	mux.HandleFunc("/server/start", startServerHandler)
 	mux.HandleFunc("/server/stop", stopServerHandler)
 	mux.HandleFunc("/server/restart", restartServerHandler)
+	mux.HandleFunc("/file_manager", fileManagerHandler)
 
-	mux.HandleFunc("/files/list", listFilesHandler)
-	mux.HandleFunc("/files/download", downloadFileHandler)
-	mux.HandleFunc("/files/upload", uploadFileHandler)
-	mux.HandleFunc("/files/delete", deleteFileHandler)
-
-	protectedHandler := tokenMiddleware(token, mux)
-
-	fmt.Println("Node HTTP server listening on :25575")
-	if err := http.ListenAndServe(":25575", protectedHandler); err != nil {
-		panic(err)
+	fmt.Println("Server listening on :25575")
+	err := http.ListenAndServe(":25575", tokenMiddleware(token, mux))
+	if err != nil {
+		fmt.Println("Server failed:", err)
 	}
 }
