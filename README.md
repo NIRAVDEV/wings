@@ -18,17 +18,20 @@ This is the Go-based node server for your Minecraft control panel. It verifies h
 
 
 3. Copy the example env file and set your handshake token:
+```
 cp .env.example env file
 nano .env
+```
 - Add the token in HANDSHAKE_TOKEN
 
 4. Build the server binary:
-'''bash
+```bash
 go build -o mcnode
-
+```
 6. Run the node server:
+```bash
 ./mcnode
-
+```
 
 ### API Usage
 
