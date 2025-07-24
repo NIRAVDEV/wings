@@ -5,16 +5,33 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/joho/godotenv"
 )
 
+// HandshakeResponse is the response JSON for /handshake
 type HandshakeResponse struct {
 	Status string `json:"status"`
 	Reason string `json:"reason,omitempty"`
 }
 
+// CreateServerRequest defines the expected JSON body for /server/start
+type CreateServerRequest struct {
+	ServerName string `json:"serverName"` // e.g. "lobby"
+	UserEmail  string `json:"userEmail"`  // e.g. "alice@example.com"
+	HostPort   string `json:"hostPort"`   // e.g. "25565" - port to expose on host
+}
+
+// GenericResponse is a generic status response
+type GenericResponse struct {
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+}
+
+// loadToken loads HANDSHAKE_TOKEN from .env file
 func loadToken() string {
 	err := godotenv.Load()
 	if err != nil {
@@ -29,7 +46,100 @@ func loadToken() string {
 	return token
 }
 
-// Middleware to verify Authorization header "Bearer <token>"
+// extractUserId extracts the part before '@' from email, e.g., 'alice@example.com' -> 'alice'
+func extractUserId(email string) string {
+	parts := strings.Split(email, "@")
+	if len(parts) == 0 {
+		return "unknown"
+	}
+	return parts[0]
+}
+
+// startMCServer creates/starts the container with unique name: <serverName>-<userId>
+func startMCServer(name, userEmail, hostPort string) error {
+	userId := extractUserId(userEmail)
+	containerName := fmt.Sprintf("%s-%s", name, userId)
+	volumePath := filepath.Join("./volume", containerName)
+
+	// Create volume folder if it does not exist
+	if err := os.MkdirAll(volumePath, 0755); err != nil {
+		return fmt.Errorf("failed to create volume dir: %w", err)
+	}
+
+	// Check if container already exists
+	cmdCheck := exec.Command("docker", "ps", "-a", "-q", "-f", "name="+containerName)
+	output, err := cmdCheck.Output()
+	if err != nil {
+		return fmt.Errorf("docker check error: %w", err)
+	}
+
+	if len(output) > 0 {
+		// Container exists, try to start it
+		cmdStart := exec.Command("docker", "start", containerName)
+		out, err := cmdStart.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("docker start error: %s, %w", string(out), err)
+		}
+		return nil
+	}
+
+	// Run a new container
+	cmdRun := exec.Command("docker", "run", "-d",
+		"--name", containerName,
+		"-p", hostPort+":25565",
+		"-v", volumePath+":/data",
+		"itzg/minecraft-server",
+	)
+	out, err := cmdRun.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker run error: %s, %w", string(out), err)
+	}
+	return nil
+}
+
+// startServerHandler handles POST /server/start
+func startServerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req CreateServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	if req.ServerName == "" || req.UserEmail == "" {
+		http.Error(w, "serverName and userEmail are required", http.StatusBadRequest)
+		return
+	}
+
+	if req.HostPort == "" {
+		// Default port if not passed
+		req.HostPort = "25565"
+	}
+
+	err := startMCServer(req.ServerName, req.UserEmail, req.HostPort)
+	if err != nil {
+		resp := GenericResponse{Status: "error", Message: err.Error()}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := GenericResponse{Status: "ok", Message: "Server started successfully"}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// handshakeHandler handles POST /handshake
+func handshakeHandler(w http.ResponseWriter, r *http.Request) {
+	resp := HandshakeResponse{Status: "ok"}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// tokenMiddleware checks Authorization header is "Bearer <token>"
 func tokenMiddleware(expectedToken string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -48,25 +158,17 @@ func tokenMiddleware(expectedToken string, next http.Handler) http.Handler {
 	})
 }
 
-// Handshake handler, just confirm the token is valid
-func handshakeHandler(w http.ResponseWriter, r *http.Request) {
-	resp := HandshakeResponse{Status: "ok"}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
 func main() {
 	token := loadToken()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/handshake", handshakeHandler)
+	mux.HandleFunc("/server/start", startServerHandler)
 
-	// Wrap all routes with token middleware
 	protectedHandler := tokenMiddleware(token, mux)
 
 	fmt.Println("Node HTTP server listening on :25575")
-	err := http.ListenAndServe(":25575", protectedHandler)
-	if err != nil {
+	if err := http.ListenAndServe(":25575", protectedHandler); err != nil {
 		panic(err)
 	}
 }
