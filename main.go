@@ -317,4 +317,21 @@ func main() {
 	if err := http.ListenAndServe(":25575", protectedHandler); err != nil {
 		panic(err)
 	}
+mux := http.NewServeMux()
+
+mux.HandleFunc("/handshake", handshakeHandler)
+
+// Add new server control endpoints
+mux.HandleFunc("/server/start", startServerHandler)
+mux.HandleFunc("/server/stop", stopServerHandler)
+mux.HandleFunc("/server/restart", restartServerHandler)
+
+protectedHandler := tokenMiddleware(token, mux)
+
+fmt.Println("Node HTTP server listening on :25575")
+err := http.ListenAndServe(":25575", protectedHandler)
+if err != nil {
+	panic(err)
+}
+
 }
