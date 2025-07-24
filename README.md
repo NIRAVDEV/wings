@@ -1,78 +1,101 @@
 # MCNode - Minecraft Node Server
 
-This is the Go-based node server for your Minecraft control panel. It verifies handshake tokens and will manage Docker Minecraft server containers in future versions.
+A Go HTTP server to manage Minecraft Docker containers for your control panel.
+
+## Features
+
+- Secured by Bearer token authentication on every request
+- /handshake endpoint to verify token
+- /server/start endpoint creates or starts a Minecraft container with unique name per user
+- Uses Docker to run Minecraft servers with volumes per server inside `volume/<container-name>`
+- Unique container names: `<server-name>-<userId>` where `userId` is email username part
 
 ## Getting Started
 
 ### Prerequisites
 
-- Go (1.18 or later recommended)
-- Docker installed on the node VPS
-- Git (optional for clone)
+- Go 1.18 or newer
+- Docker installed and runnable by current user
+- Your `.env` file with `HANDSHAKE_TOKEN`
 
 ### Setup
 
-1. Clone or download this repository on your Minecraft server VPS.
+1. Clone this repo on your Minecraft VPS.
 
-2. Install dependencies and initialize Go module:
+2. Copy `.env.example` to `.env` and edit the token:
 ```bash
-go mod init mcnode
-go get github.com/joho/godotenv
-```
-
-3. Copy the example env file and set your handshake token:
-```
-cp .env.example env file
+cp env.example env 
 nano .env
 ```
-- Add the token in HANDSHAKE_TOKEN
 
-4. Build the server binary:
+3. Download dependencies:
 ```bash
-go build -o mcnode
+go mod tidy
 ```
-6. Run the node server:
+
+4. Build the binary:
+```bash
+go build -o mcnode .
+```
+
+5. Run the server:
 ```bash
 ./mcnode
 ```
 
-### API Usage
 
-The node server listens on port `25575` and exposes the following endpoint so far:
-
-#### POST `/handshake`
-
-Verifies the token sent in the `Authorization` header using the Bearer scheme.
-
-- Request Headers:
-
-- Request Body:
-
-Empty JSON or `{}` is acceptable.
-
-- Response:
-{"status": "ok"}
+You should see:
+- Node HTTP server listening on :25575
 
 
-- HTTP 401 if token invalid or missing.
+
+### API Endpoints
+
+All endpoints require HTTP header:
+- Authorization: Bearer your-actual-token
+Content-Type: application/json
+
+
+#### POST /handshake
+
+Simple endpoint to verify token
+
+- Request body: `{}` or empty allowed
+- Response: `{ "status": "ok" }`
+
+#### POST /server/start
+
+Start or create a Minecraft server container with unique naming:
+
+- Request JSON body:
+```
+{
+"serverName": "lobby",
+"userEmail": "alice@example.com",
+"hostPort": "25565" // (optional) port to expose on VPS
+}
+```
+
+- Response example:
+```
+{
+"status": "ok",
+"message": "Server started successfully"
+}
+```
+
+### Folder Structure
+
+- Server data stored in `volume/<server-name>-<userId>/`
+- Each container mounts its folder to `/data` inside Docker container
 
 ### Next Steps
 
-Future endpoints will implement commands such as:
-
-- Start / Stop / Restart Minecraft servers inside Docker containers
-- File management for server files
-
-All endpoints will require the same Bearer token in the `Authorization` header.
+- Implement `/server/stop`, `/server/restart`
+- Add file management API endpoints
+- Enhance error handling and port management
 
 ---
 
-### Notes
+Keep your `.env` secret and secure. Use firewall or network rules to restrict access to port `25575`.
 
-- Keep your `.env` secret and never commit it to version control!
-- Always run the node behind a firewall or restrict access to trusted IPs.
-- Secure communication using TLS/proxy for production.
-
----
-
-If you have any questions or need help, just ask!
