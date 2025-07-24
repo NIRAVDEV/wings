@@ -15,7 +15,10 @@ This is the Go-based node server for your Minecraft control panel. It verifies h
 1. Clone or download this repository on your Minecraft server VPS.
 
 2. Install dependencies and initialize Go module:
-
+```bash
+go mod init mcnode
+go get github.com/joho/godotenv
+```
 
 3. Copy the example env file and set your handshake token:
 ```
