@@ -54,6 +54,69 @@ func extractUserId(email string) string {
 	}
 	return parts[0]
 }
+func getServerDataDir(serverName, userEmail string) string {
+	userId := extractUserId(userEmail)
+	return filepath.Join("./volume", fmt.Sprintf("%s-%s", serverName, userId))
+}
+func listFilesHandler(w http.ResponseWriter, r *http.Request) {
+	serverName := r.URL.Query().Get("serverName")
+	userEmail := r.URL.Query().Get("userEmail")
+	relPath := r.URL.Query().Get("path") // optional
+
+	if serverName == "" || userEmail == "" {
+		http.Error(w, "serverName and userEmail are required", http.StatusBadRequest)
+		return
+	}
+
+	baseDir := getServerDataDir(serverName, userEmail)
+	dirPath := baseDir
+	if relPath != "" {
+		dirPath = filepath.Join(baseDir, relPath)
+	}
+
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		http.Error(w, "Failed to read directory: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	type FileEntry struct {
+		Name  string `json:"name"`
+		IsDir bool   `json:"isDir"`
+	}
+	var files []FileEntry
+	for _, entry := range entries {
+		files = append(files, FileEntry{
+			Name:  entry.Name(),
+			IsDir: entry.IsDir(),
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(files)
+}
+func downloadFileHandler(w http.ResponseWriter, r *http.Request) {
+	serverName := r.URL.Query().Get("serverName")
+	userEmail := r.URL.Query().Get("userEmail")
+	filePath := r.URL.Query().Get("path") // must be relative, required
+
+	if serverName == "" || userEmail == "" || filePath == "" {
+		http.Error(w, "serverName, userEmail, and path are required", http.StatusBadRequest)
+		return
+	}
+	baseDir := getServerDataDir(serverName, userEmail)
+	fullPath := filepath.Join(baseDir, filePath)
+
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Disposition", "attachment; filename="+filepath.Base(filePath))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(data)
+}
+
 
 // startMCServer creates/starts the container with unique name: <serverName>-<userId>
 func startMCServer(name, userEmail, hostPort string) error {
