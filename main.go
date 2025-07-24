@@ -396,5 +396,9 @@ err := http.ListenAndServe(":25575", protectedHandler)
 if err != nil {
 	panic(err)
 }
+mux.HandleFunc("/files/list", listFilesHandler)
+mux.HandleFunc("/files/download", downloadFileHandler)
+mux.HandleFunc("/files/upload", uploadFileHandler)
+mux.HandleFunc("/files/delete", deleteFileHandler)
 
 }
