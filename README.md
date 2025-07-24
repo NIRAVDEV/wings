@@ -23,9 +23,8 @@ nano .env
 - Add the token in HANDSHAKE_TOKEN
 
 4. Build the server binary:
-'''
+'''bash
 go build -o mcnode
-'''
 
 6. Run the node server:
 ./mcnode
