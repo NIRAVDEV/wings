@@ -18,8 +18,10 @@ import (
 type CreateServerRequest struct {
 	ServerName string `json:"serverName"`
 	UserEmail  string `json:"userEmail"`
-	Software   string `json:"software"`
-	HostPort   string `json:"hostPort,omitempty"`
+	Type       string `json:"type,omitempty"` // Optional type of server
+	Software   string `json:"software"`      // Required software type (e.g., "
+	RAM        string `json:"ram,omitempty"` // Optional RAM allocation
+	Storage    string `json:"storage,omitempty"` // Optional storage allocation
 }
 type CreateServerResponse struct {
 	Status   string `json:"status"`
@@ -64,20 +66,8 @@ func buildContainerId(serverName, userId string) string {
 	return sanitizeDockerName(raw)
 }
 func selectImage(software string) string {
-	switch strings.ToLower(software) {
-	case "vanilla":
-		return "itzg/minecraft-server:latest"
-	case "paper":
-		return "marctv/minecraft-papermc-server:latest"
-	case "purpur":
-		return "itzg/minecraft-server:purpur"
-	case "spigot":
-		return "itzg/minecraft-server:spigot"
-	case "fabric":
-		return "itzg/minecraft-server:fabric"
-	default:
-		return "itzg/minecraft-server:latest"
-	}
+    // Always return the universal image
+    return "itzg/minecraft-server:latest"
 }
 func tokenMiddleware(expected string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -136,12 +126,8 @@ func createServerHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to create volume: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	hostPort := req.HostPort
-	if hostPort == "" {
-		hostPort = "25565"
-	}
 	fmt.Println("Creating server...")
-	fmt.Printf("ServerName: %s, Email: %s, Image: %s, HostPort: %s\n", req.ServerName, req.UserEmail, image, hostPort)
+	fmt.Printf("ServerName: %s, Email: %s, Image: %s\n", req.ServerName, req.UserEmail, image)
 	fmt.Println("VolumePath:", VolumePath)
 	
 	// Create (do not start) server container
@@ -149,8 +135,10 @@ func createServerHandler(w http.ResponseWriter, r *http.Request) {
 		"docker", "create",
 		"--name", containerId,
 		"-v", VolumePath+":/data",
-		"-p", hostPort+":25565",
 		"-e", "EULA=TRUE",
+		"-e", "TYPE="+strings.ToUpper(req.Software),
+		"-e", "MEMORY="+req.RAM,
+		"-e", "STORAGE="+req.Storage,
 		"--restart", "unless-stopped",
 		image,
 	)
