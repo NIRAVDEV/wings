@@ -1,5 +1,7 @@
 package main
 
+
+
 import (
     "encoding/json"
     "fmt"
@@ -16,6 +18,10 @@ import (
     "github.com/gorilla/websocket"
     "github.com/joho/godotenv"
 )
+
+// ================== Global Variables ==================
+// logConnectionCounter is used to track the number of active WebSocket connections for logging purposes.
+var logConnectionCounter = 0
 
 // ================== Request/Response Structs ==================
 type CreateServerRequest struct {
@@ -317,6 +323,7 @@ var upgrader = websocket.Upgrader{
     CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+
 func consoleHandler(w http.ResponseWriter, r *http.Request) {
     conn, err := upgrader.Upgrade(w, r, nil)
     if err != nil {
@@ -332,7 +339,7 @@ func consoleHandler(w http.ResponseWriter, r *http.Request) {
         Action     string `json:"action"`
     }
 
-    // Read initial connection payload
+    // Read initial payload
     _, msg, err := conn.ReadMessage()
     if err != nil {
         log.Println("Failed to read initial message:", err)
@@ -348,7 +355,16 @@ func consoleHandler(w http.ResponseWriter, r *http.Request) {
     userId := extractUserId(init.UserEmail)
     containerId := buildContainerId(init.ServerName, userId)
 
-    // Start docker logs -f
+    // Clear logs every 2nd connection
+    logConnectionCounter++
+    if logConnectionCounter%2 == 0 {
+        truncateCmd := exec.Command("sh", "-c", fmt.Sprintf("truncate -s 0 $(docker inspect --format='{{.LogPath}}' %s)", containerId))
+        if err := truncateCmd.Run(); err != nil {
+            log.Println("Failed to truncate logs:", err)
+        }
+    }
+
+    // Start docker logs -f after connection
     logCmd := exec.Command("docker", "logs", "-f", containerId)
     stdout, err := logCmd.StdoutPipe()
     if err != nil {
@@ -375,7 +391,7 @@ func consoleHandler(w http.ResponseWriter, r *http.Request) {
         }
     }()
 
-    // Listen for commands
+    // Handle incoming commands
     for {
         _, msg, err := conn.ReadMessage()
         if err != nil {
@@ -402,6 +418,11 @@ func consoleHandler(w http.ResponseWriter, r *http.Request) {
     _ = logCmd.Process.Kill()
 }
 
+func nodeStatusHandler(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(GenericResponse{Status: "ok", Message: "Node is running"})
+}
+
 // ================== Main ==================
 
 func main() {
@@ -416,6 +437,7 @@ func main() {
     mux.HandleFunc("/file_manager", fileManagerHandler)
     mux.HandleFunc("/file/upload", fileUploadHandler)
     mux.HandleFunc("/file/download", fileDownloadHandler)
+    mux.HandleFunc("/node/status", nodeStatusHandler)
     fmt.Println("Agent listening on :25575")
     if err := http.ListenAndServe(":25575", tokenMiddleware(token, mux)); err != nil {
         fmt.Println("Server failed:", err)
