@@ -85,8 +85,23 @@ func buildContainerId(serverName, userId string) string {
     return sanitizeDockerName(raw)
 }
 
-func selectImage(software string) string {
-    return "itzg/minecraft-server:latest"
+func getMinecraftType(software string) string {
+    switch strings.ToLower(software) {
+    case "vanilla":
+        return "VANILLA"
+    case "paper":
+        return "PAPER" 
+    case "purpur":
+        return "PURPUR"
+    case "fabric":
+        return "FABRIC"
+    case "forge":
+        return "FORGE"
+    case "spigot":
+        return "SPIGOT"
+    default:
+        return "VANILLA"
+    }
 }
 
 func tokenMiddleware(expected string, next http.Handler) http.Handler {
@@ -145,7 +160,7 @@ func createServerHandler(w http.ResponseWriter, r *http.Request) {
         "--name", containerId,
         "-v", volumePath+":/data",
         "-e", "EULA=TRUE",
-        "-e", "TYPE="+strings.ToUpper(req.Software),
+        "-e", "TYPE="+getMinecraftType(req.Software),
         "-e", "MEMORY="+req.RAM,
         "-e", "STORAGE="+req.Storage,
         "--restart", "unless-stopped",
